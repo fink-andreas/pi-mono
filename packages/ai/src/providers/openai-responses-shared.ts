@@ -54,6 +54,7 @@ export interface OpenAIResponsesStreamOptions {
 		usage: Usage,
 		serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	) => void;
+	onChunk?: (event: ResponseStreamEvent) => void;
 }
 
 export interface ConvertResponsesMessagesOptions {
@@ -271,6 +272,8 @@ export async function processResponsesStream<TApi extends Api>(
 	const blockIndex = () => blocks.length - 1;
 
 	for await (const event of openaiStream) {
+		options?.onChunk?.(event);
+
 		if (event.type === "response.output_item.added") {
 			const item = event.item;
 			if (item.type === "reasoning") {

@@ -11,6 +11,9 @@ import type {
 import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost, supportsXhigh } from "../models.js";
 import type {
+	ApiErrorLog,
+	ApiRequestLog,
+	ApiResponseLog,
 	AssistantMessage,
 	Context,
 	Message,
@@ -105,6 +108,27 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const client = createClient(model, context, apiKey, options?.headers);
 			const params = buildParams(model, context, options);
 			options?.onPayload?.(params);
+
+			// Log request if debug logging is enabled
+			if (options?.onRequestLog) {
+				const baseUrl = model.baseUrl || client.baseURL;
+				const headers: Record<string, string> = {};
+				if (apiKey) {
+					headers.authorization = "Bearer ***";
+				}
+				const requestLog: ApiRequestLog = {
+					type: "request",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					method: "POST",
+					url: `${baseUrl}/chat/completions`,
+					headers: apiKey ? headers : undefined,
+					body: params,
+				};
+				options.onRequestLog(requestLog);
+			}
+
 			const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
 			stream.push({ type: "start", partial: output });
 
@@ -141,6 +165,19 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			};
 
 			for await (const chunk of openaiStream) {
+				// Log response chunk if debug logging is enabled
+				if (options?.onResponseLog) {
+					const responseLog: ApiResponseLog = {
+						type: "response_chunk",
+						timestamp: Date.now(),
+						provider: model.provider,
+						model: model.id,
+						chunkType: "chunk",
+						data: chunk,
+					};
+					options.onResponseLog(responseLog);
+				}
+
 				if (chunk.usage) {
 					const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
 					const reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens || 0;
@@ -307,6 +344,22 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			// Log error if debug logging is enabled
+			if (options?.onErrorLog) {
+				const errorLog: ApiErrorLog = {
+					type: "error",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					status: (error as any)?.status || undefined,
+					error: {
+						message: error instanceof Error ? error.message : JSON.stringify(error),
+						...(error instanceof Error && { name: error.name, stack: error.stack }),
+					},
+				};
+				options.onErrorLog(errorLog);
+			}
+
 			for (const block of output.content) delete (block as any).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);

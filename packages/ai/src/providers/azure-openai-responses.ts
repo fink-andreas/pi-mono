@@ -4,6 +4,9 @@ import { getEnvApiKey } from "../env-api-keys.js";
 import { supportsXhigh } from "../models.js";
 import type {
 	Api,
+	ApiErrorLog,
+	ApiRequestLog,
+	ApiResponseLog,
 	AssistantMessage,
 	Context,
 	Model,
@@ -87,13 +90,46 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			const client = createClient(model, apiKey, options);
 			const params = buildParams(model, context, options, deploymentName);
 			options?.onPayload?.(params);
+
+			// Log request if debug logging is enabled
+			if (options?.onRequestLog) {
+				const { baseUrl } = resolveAzureConfig(model, options);
+				const requestLog: ApiRequestLog = {
+					type: "request",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					method: "POST",
+					url: `${baseUrl}/responses`,
+					headers: {
+						"api-key": "***",
+					},
+					body: params,
+				};
+				options.onRequestLog(requestLog);
+			}
+
 			const openaiStream = await client.responses.create(
 				params,
 				options?.signal ? { signal: options.signal } : undefined,
 			);
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model);
+			await processResponsesStream(openaiStream, output, stream, model, {
+				onChunk: options?.onResponseLog
+					? (event) => {
+							const responseLog: ApiResponseLog = {
+								type: "response_chunk",
+								timestamp: Date.now(),
+								provider: model.provider,
+								model: model.id,
+								chunkType: event.type,
+								data: event,
+							};
+							options.onResponseLog!(responseLog);
+						}
+					: undefined,
+			});
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -106,6 +142,22 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			// Log error if debug logging is enabled
+			if (options?.onErrorLog) {
+				const errorLog: ApiErrorLog = {
+					type: "error",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					status: (error as any)?.status || undefined,
+					error: {
+						message: error instanceof Error ? error.message : JSON.stringify(error),
+						...(error instanceof Error && { name: error.name, stack: error.stack }),
+					},
+				};
+				options.onErrorLog(errorLog);
+			}
+
 			for (const block of output.content) delete (block as { index?: number }).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);

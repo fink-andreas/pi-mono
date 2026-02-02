@@ -8,6 +8,9 @@ import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost } from "../models.js";
 import type {
 	Api,
+	ApiErrorLog,
+	ApiRequestLog,
+	ApiResponseLog,
 	AssistantMessage,
 	CacheRetention,
 	Context,
@@ -204,6 +207,25 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			);
 			const params = buildParams(model, context, isOAuthToken, options);
 			options?.onPayload?.(params);
+
+			// Log request if debug logging is enabled
+			if (options?.onRequestLog) {
+				const requestLog: ApiRequestLog = {
+					type: "request",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					method: "POST",
+					url: model.baseUrl || "https://api.anthropic.com/v1/messages",
+					headers: {
+						"anthropic-version": "2023-06-01",
+						...(isOAuthToken && { "x-app": "cli" }),
+					},
+					body: params,
+				};
+				options.onRequestLog(requestLog);
+			}
+
 			const anthropicStream = client.messages.stream({ ...params, stream: true }, { signal: options?.signal });
 			stream.push({ type: "start", partial: output });
 
@@ -211,6 +233,19 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			const blocks = output.content as Block[];
 
 			for await (const event of anthropicStream) {
+				// Log response chunk if debug logging is enabled
+				if (options?.onResponseLog) {
+					const responseLog: ApiResponseLog = {
+						type: "response_chunk",
+						timestamp: Date.now(),
+						provider: model.provider,
+						model: model.id,
+						chunkType: event.type,
+						data: event,
+					};
+					options.onResponseLog(responseLog);
+				}
+
 				if (event.type === "message_start") {
 					// Capture initial token usage from message_start event
 					// This ensures we have input token counts even if the stream is aborted early
@@ -366,6 +401,22 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			// Log error if debug logging is enabled
+			if (options?.onErrorLog) {
+				const errorLog: ApiErrorLog = {
+					type: "error",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					status: (error as any)?.status || (error as any)?.statusCode || undefined,
+					error: {
+						message: error instanceof Error ? error.message : JSON.stringify(error),
+						...(error instanceof Error && { name: error.name, stack: error.stack }),
+					},
+				};
+				options.onErrorLog(errorLog);
+			}
+
 			for (const block of output.content) delete (block as any).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);

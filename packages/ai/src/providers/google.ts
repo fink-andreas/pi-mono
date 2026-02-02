@@ -8,6 +8,9 @@ import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost } from "../models.js";
 import type {
 	Api,
+	ApiErrorLog,
+	ApiRequestLog,
+	ApiResponseLog,
 	AssistantMessage,
 	Context,
 	Model,
@@ -76,6 +79,24 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			const client = createClient(model, apiKey, options?.headers);
 			const params = buildParams(model, context, options);
 			options?.onPayload?.(params);
+
+			// Log request if debug logging is enabled
+			if (options?.onRequestLog) {
+				const requestLog: ApiRequestLog = {
+					type: "request",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					method: "POST",
+					url: model.baseUrl
+						? `${model.baseUrl}/v1beta/models/${model.id}:generateContent`
+						: `https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent`,
+					headers: apiKey ? { "x-goog-api-key": "***" } : {},
+					body: params,
+				};
+				options.onRequestLog(requestLog);
+			}
+
 			const googleStream = await client.models.generateContentStream(params);
 
 			stream.push({ type: "start", partial: output });
@@ -83,6 +104,18 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
 			for await (const chunk of googleStream) {
+				// Log response chunk if debug logging is enabled
+				if (options?.onResponseLog) {
+					const responseLog: ApiResponseLog = {
+						type: "response_chunk",
+						timestamp: Date.now(),
+						provider: model.provider,
+						model: model.id,
+						chunkType: "chunk",
+						data: chunk,
+					};
+					options.onResponseLog(responseLog);
+				}
 				const candidate = chunk.candidates?.[0];
 				if (candidate?.content?.parts) {
 					for (const part of candidate.content.parts) {
@@ -252,6 +285,22 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			// Log error if debug logging is enabled
+			if (options?.onErrorLog) {
+				const errorLog: ApiErrorLog = {
+					type: "error",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					status: (error as any)?.status || undefined,
+					error: {
+						message: error instanceof Error ? error.message : JSON.stringify(error),
+						...(error instanceof Error && { name: error.name, stack: error.stack }),
+					},
+				};
+				options.onErrorLog(errorLog);
+			}
+
 			// Remove internal index property used during streaming
 			for (const block of output.content) {
 				if ("index" in block) {

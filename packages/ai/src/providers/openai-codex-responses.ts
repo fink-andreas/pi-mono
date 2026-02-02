@@ -11,6 +11,9 @@ import { getEnvApiKey } from "../env-api-keys.js";
 import { supportsXhigh } from "../models.js";
 import type {
 	Api,
+	ApiErrorLog,
+	ApiRequestLog,
+	ApiResponseLog,
 	AssistantMessage,
 	Context,
 	Model,
@@ -137,6 +140,24 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const headers = buildHeaders(model.headers, options?.headers, accountId, apiKey, options?.sessionId);
 			const bodyJson = JSON.stringify(body);
 
+			// Log request if debug logging is enabled
+			if (options?.onRequestLog) {
+				const requestLog: ApiRequestLog = {
+					type: "request",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					method: "POST",
+					url: CODEX_URL,
+					headers: {
+						authorization: "***",
+						account_id: accountId,
+					},
+					body,
+				};
+				options.onRequestLog(requestLog);
+			}
+
 			// Fetch with retry logic for rate limits and transient errors
 			let response: Response | undefined;
 			let lastError: Error | undefined;
@@ -198,7 +219,21 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			stream.push({ type: "start", partial: output });
-			await processStream(response, output, stream, model);
+			await processStream(response, output, stream, model, {
+				onChunk: options?.onResponseLog
+					? (event) => {
+							const responseLog: ApiResponseLog = {
+								type: "response_chunk",
+								timestamp: Date.now(),
+								provider: model.provider,
+								model: model.id,
+								chunkType: event.type,
+								data: event,
+							};
+							options.onResponseLog!(responseLog);
+						}
+					: undefined,
+			});
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -207,6 +242,22 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
+			// Log error if debug logging is enabled
+			if (options?.onErrorLog) {
+				const errorLog: ApiErrorLog = {
+					type: "error",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					status: (error as any)?.status || undefined,
+					error: {
+						message: error instanceof Error ? error.message : String(error),
+						...(error instanceof Error && { name: error.name, stack: error.stack }),
+					},
+				};
+				options.onErrorLog(errorLog);
+			}
+
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : String(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -297,8 +348,11 @@ async function processStream(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
+	options?: { onChunk?: (event: ResponseStreamEvent) => void },
 ): Promise<void> {
-	await processResponsesStream(mapCodexEvents(parseSSE(response)), output, stream, model);
+	await processResponsesStream(mapCodexEvents(parseSSE(response)), output, stream, model, {
+		onChunk: options?.onChunk,
+	});
 }
 
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {

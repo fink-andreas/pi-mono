@@ -53,6 +53,49 @@ export interface ThinkingBudgets {
 // Base options all providers share
 export type CacheRetention = "none" | "short" | "long";
 
+/**
+ * Debug log entry for API requests
+ */
+export interface ApiRequestLog {
+	type: "request";
+	timestamp: number;
+	provider: string;
+	model: string;
+	method: string;
+	url?: string;
+	headers?: Record<string, string>;
+	body: unknown;
+}
+
+/**
+ * Debug log entry for API responses (streaming chunks)
+ */
+export interface ApiResponseLog {
+	type: "response_chunk" | "response";
+	timestamp: number;
+	provider: string;
+	model: string;
+	chunkType?: string;
+	data: unknown;
+}
+
+/**
+ * Debug log entry for API errors
+ */
+export interface ApiErrorLog {
+	type: "error";
+	timestamp: number;
+	provider: string;
+	model: string;
+	status?: number;
+	error: unknown;
+}
+
+/**
+ * Debug log entry (union of all log types)
+ */
+export type ApiDebugLog = ApiRequestLog | ApiResponseLog | ApiErrorLog;
+
 export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
@@ -73,6 +116,21 @@ export interface StreamOptions {
 	 * Optional callback for inspecting provider payloads before sending.
 	 */
 	onPayload?: (payload: unknown) => void;
+	/**
+	 * Optional callback for logging API requests (full request details).
+	 * Called with provider, model, URL, method, headers, and request body.
+	 */
+	onRequestLog?: (log: ApiRequestLog) => void;
+	/**
+	 * Optional callback for logging API responses (streaming chunks or final response).
+	 * Called with provider, model, chunk type, and response data.
+	 */
+	onResponseLog?: (log: ApiResponseLog) => void;
+	/**
+	 * Optional callback for logging API errors.
+	 * Called with provider, model, status code, and error details.
+	 */
+	onErrorLog?: (log: ApiErrorLog) => void;
 	/**
 	 * Optional custom HTTP headers to include in API requests.
 	 * Merged with provider defaults; can override default headers.

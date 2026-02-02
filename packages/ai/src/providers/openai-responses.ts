@@ -4,6 +4,9 @@ import { getEnvApiKey } from "../env-api-keys.js";
 import { supportsXhigh } from "../models.js";
 import type {
 	Api,
+	ApiErrorLog,
+	ApiRequestLog,
+	ApiResponseLog,
 	AssistantMessage,
 	CacheRetention,
 	Context,
@@ -90,6 +93,27 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const client = createClient(model, context, apiKey, options?.headers);
 			const params = buildParams(model, context, options);
 			options?.onPayload?.(params);
+
+			// Log request if debug logging is enabled
+			if (options?.onRequestLog) {
+				const baseUrl = model.baseUrl || client.baseURL;
+				const headers: Record<string, string> = {};
+				if (apiKey) {
+					headers.authorization = "Bearer ***";
+				}
+				const requestLog: ApiRequestLog = {
+					type: "request",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					method: "POST",
+					url: `${baseUrl}/responses`,
+					headers: apiKey ? headers : undefined,
+					body: params,
+				};
+				options.onRequestLog(requestLog);
+			}
+
 			const openaiStream = await client.responses.create(
 				params,
 				options?.signal ? { signal: options.signal } : undefined,
@@ -99,6 +123,19 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			await processResponsesStream(openaiStream, output, stream, model, {
 				serviceTier: options?.serviceTier,
 				applyServiceTierPricing,
+				onChunk: options?.onResponseLog
+					? (chunk) => {
+							const responseLog: ApiResponseLog = {
+								type: "response_chunk",
+								timestamp: Date.now(),
+								provider: model.provider,
+								model: model.id,
+								chunkType: chunk.type,
+								data: chunk,
+							};
+							options.onResponseLog!(responseLog);
+						}
+					: undefined,
 			});
 
 			if (options?.signal?.aborted) {
@@ -112,6 +149,22 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			// Log error if debug logging is enabled
+			if (options?.onErrorLog) {
+				const errorLog: ApiErrorLog = {
+					type: "error",
+					timestamp: Date.now(),
+					provider: model.provider,
+					model: model.id,
+					status: (error as any)?.status || undefined,
+					error: {
+						message: error instanceof Error ? error.message : JSON.stringify(error),
+						...(error instanceof Error && { name: error.name, stack: error.stack }),
+					},
+				};
+				options.onErrorLog(errorLog);
+			}
+
 			for (const block of output.content) delete (block as { index?: number }).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
